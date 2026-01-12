@@ -1,84 +1,76 @@
 import streamlit as st
-from supabase import create_client
 import pandas as pd
-import math
 import plotly.express as px
+import math
+from supabase import create_client
 
-# --- KONFIGURACJA POŁĄCZENIA ---
+# --- POŁĄCZENIE ---
 URL = "https://pmgklpkyljdvhhxklnmq.supabase.co"
 KEY = "sb_publishable_d0ujpfmIqQlSzL7Xnj60wA_M-coVjs3"
 supabase = create_client(URL, KEY)
 
-st.set_page_config(page_title="WMS Enterprise 2026", layout="wide")
-
-# --- FUNKCJE DANYCH ---
-def fetch_data():
+# --- FUNKCJA POBIERANIA ---
+def get_data():
     res = supabase.table("magazyn").select("*, kategorie(nazwa)").execute()
-    df = pd.DataFrame(res.data)
-    if not df.empty:
-        df['kategoria'] = df['kategorie'].apply(lambda x: x['nazwa'] if x else 'Brak')
-    return df
+    return pd.DataFrame(res.data)
 
-def fetch_config():
+def get_config():
     res = supabase.table("parametry").select("*").eq("klucz", "pojemnosc_tir").single().execute()
     return res.data['wartosc_int']
 
-# --- INTERFEJS ---
-st.title("🚀 Zaawansowany System Magazynowy WMS")
+# --- GŁÓWNA APLIKACJA ---
+df = get_data()
 
-df = fetch_data()
-tir_limit = fetch_config()
+if df.empty:
+    st.warning("⚠️ Baza danych jest pusta. Dashboard nie ma danych do wyświetlenia.")
+else:
+    # Pobieranie parametru C6 dla TIRów
+    tir_limit = get_config()
 
-# APLIKACJA LOGIKI BIZNESOWEJ
-if not df.empty:
+    # Zastosowanie Twoich reguł biznesowych
     def apply_rules(row):
         status = row['status']
-        # Zasada: Choinki poniżej 30 sztuk są utylizowane
+        # Choinki poniżej 30 sztuk są utylizowane
         if "Choinka" in str(row['nazwa_produktu']) and row['ilosc'] < 30:
             status = "utylizuj"
         
-        # Zasada: Punkty odrzucane dla statusów: wysyłka, wyprzedane, utylizuj
+        # Punkty są odrzucane, gdy status to "wysyłka", "wyprzedane" lub "utylizuj"
         punkty = "NIE" if status in ["wysyłka", "wyprzedane", "utylizuj"] else "TAK"
         return pd.Series([status, punkty])
 
     df[['status', 'punkty_liczone']] = df.apply(apply_rules, axis=1)
+    
+    # Formuła do obliczania TIRów: =ZAOKR.GÓRA(ilość / pojemność)
     df['TIRy'] = df['ilosc'].apply(lambda x: math.ceil(x / tir_limit))
 
-tab_dash, tab_mag, tab_operacje, tab_hist = st.tabs(["📈 Dashboard", "📋 Magazyn", "🔄 Ruch Towaru", "📜 Historia"])
+    # --- SEKCOJA DASHBOARD ---
+    st.header("📈 Dashboard Analityczny")
+    
+    col1, col2 = st.columns(2)
 
-# --- TAB: RUCH TOWARU (TUTAJ BYŁ BŁĄD) ---
-with tab_operacje:
-    st.subheader("Zarządzanie ilością")
-    with st.form("form_ruch"):
-        prod_name = st.selectbox("Produkt", df['nazwa_produktu'].tolist())
-        operacja = st.radio("Operacja", ["Dodaj (Dostawa)", "Odejmij (Wydanie)"], horizontal=True)
-        ile = st.number_input("Ilość", min_value=1, step=1)
-        
-        if st.form_submit_button("Zapisz zmianę"):
-            row = df[df['nazwa_produktu'] == prod_name].iloc[0]
-            
-            # Obliczenie nowej ilości
-            nowa_ilosc = row['ilosc'] + ile if "Dodaj" in operacja else row['ilosc'] - ile
-            
-            if nowa_ilosc >= 0:
-                try:
-                    # KLUCZOWA POPRAWKA: int() dla nowa_ilosc oraz dla ID
-                    supabase.table("magazyn").update({"ilosc": int(nowa_ilosc)}).eq("id", int(row['id'])).execute()
-                    
-                    # Logowanie do historii
-                    supabase.table("historia_transakcji").insert({
-                        "produkt_nazwa": prod_name,
-                        "typ_operacji": "DOSTAWA" if "Dodaj" in operacja else "WYDANIE",
-                        "zmiana_ilosci": int(ile)
-                    }).execute()
-                    
-                    st.success(f"Zaktualizowano {prod_name}. Nowy stan: {nowa_ilosc}")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Błąd bazy danych: {e}")
-            else:
-                st.error("Błąd: Stan magazynowy nie może być ujemny!")
+    with col1:
+        try:
+            # Wykres słupkowy ilości produktów
+            fig1 = px.bar(df, x='nazwa_produktu', y='ilosc', color='status', 
+                          title="Ilość towaru wg Statusu",
+                          labels={'ilosc': 'Liczba sztuk', 'nazwa_produktu': 'Produkt'})
+            st.plotly_chart(fig1, use_container_width=True)
+        except Exception as e:
+            st.error(f"Błąd wykresu słupkowego: {e}")
 
-# --- TAB: MAGAZYN ---
-with tab_mag:
-    st.dataframe(df[['nazwa_produktu', 'kategoria', 'ilosc', 'status', 'punkty_liczone', 'TIRy']], use_container_width=True)
+    with col2:
+        try:
+            # Wykres kołowy kategorii
+            # Wyciągamy nazwy kategorii
+            df['kat_nazwa'] = df['kategorie'].apply(lambda x: x['nazwa'] if x else 'Brak')
+            fig2 = px.pie(df, names='kat_nazwa', title="Udział Kategorii w Magazynie")
+            st.plotly_chart(fig2, use_container_width=True)
+        except Exception as e:
+            st.error(f"Błąd wykresu kołowego: {e}")
+
+    # Statystyki ogólne
+    st.divider()
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Suma towaru", int(df['ilosc'].sum()))
+    m2.metric("Łącznie TIRów", int(df['TIRy'].sum()))
+    m3.metric("Produkty utylizowane", len(df[df['status'] == 'utylizuj']))
