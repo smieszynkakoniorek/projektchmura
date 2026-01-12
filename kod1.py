@@ -3,20 +3,24 @@ from supabase import create_client
 import pandas as pd
 import math
 
-# --- POŁĄCZENIE ---
+# --- KONFIGURACJA POŁĄCZENIA ---
 URL = "https://pmgklpkyljdvhhxklnmq.supabase.co"
 KEY = "sb_publishable_d0ujpfmIqQlSzL7Xnj60wA_M-coVjs3"
 supabase = create_client(URL, KEY)
 
 st.set_page_config(page_title="WMS Enterprise 2026", layout="wide")
 
-# --- FUNKCJE BAZODANOWE ---
+# --- FUNKCJE POMOCNICZE ---
 def fetch_data():
     res = supabase.table("magazyn").select("*, kategorie(nazwa)").execute()
     df = pd.DataFrame(res.data)
     if not df.empty:
         df['kategoria'] = df['kategorie'].apply(lambda x: x['nazwa'] if x else 'Brak')
     return df
+
+def fetch_categories():
+    res = supabase.table("kategorie").select("*").execute()
+    return {item['nazwa']: item['id'] for item in res.data}
 
 def fetch_config():
     res = supabase.table("parametry").select("*").eq("klucz", "pojemnosc_tir").single().execute()
@@ -25,80 +29,106 @@ def fetch_config():
 # --- INTERFEJS ---
 st.title("🚀 Zaawansowany System WMS")
 
-# Taby dla lepszej organizacji
-tab_magazyn, tab_zarzadzanie, tab_ustawienia = st.tabs(["📋 Stan Magazynowy", "🛠️ Edycja i Usuwanie", "⚙️ Ustawienia Systemu"])
+# Definicja zakładek
+tab_magazyn, tab_dodaj, tab_zarzadzanie, tab_ustawienia = st.tabs([
+    "📋 Stan Magazynowy", 
+    "➕ Dodaj Towar", 
+    "🛠️ Edycja i Usuwanie", 
+    "⚙️ Ustawienia"
+])
 
-# --- TAB 3: USTAWIENIA (Zarządzanie parametrem C6) ---
-with tab_ustawienia:
-    st.header("Parametry Logistyczne")
-    config = fetch_config()
-    nowa_pojemnosc = st.number_input("Pojemność 1 TIRa (Parametr $C$6)", value=config['wartosc_int'], step=1)
-    if st.button("Zapisz nową pojemność"):
-        supabase.table("parametry").update({"wartosc_int": nowa_pojemnosc}).eq("klucz", "pojemnosc_tir").execute()
-        st.success("Zaktualizowano parametry transportu!")
-        st.rerun()
+# Pobieranie parametrów logistycznych (Parametr $C$6)
+config = fetch_config()
+tir_limit = config['wartosc_int']
 
-tir_limit = nowa_pojemnosc
+# --- TAB: DODAJ TOWAR ---
+with tab_dodaj:
+    st.header("Wprowadzanie nowego towaru do bazy")
+    kat_dict = fetch_categories()
+    
+    with st.form("form_nowy_towar", clear_on_submit=True):
+        col1, col2 = st.columns(2)
+        with col1:
+            n_nazwa = st.text_input("Nazwa produktu", placeholder="np. Choinka Jodła")
+            n_ilosc = st.number_input("Ilość (sztuki)", min_value=0, step=1)
+            n_cena = st.number_input("Cena jednostkowa (PLN)", min_value=0.0, step=0.01)
+        
+        with col2:
+            n_kat = st.selectbox("Kategoria", options=list(kat_dict.keys()))
+            n_status = st.selectbox("Status początkowy", ["dostępny", "wysyłka", "wyprzedane", "utylizuj"])
+        
+        submit = st.form_submit_button("✅ Dodaj produkt do magazynu")
+        
+        if submit:
+            if n_nazwa:
+                nowy_rekord = {
+                    "nazwa_produktu": n_nazwa,
+                    "ilosc": n_ilosc,
+                    "cena": n_cena,
+                    "kategoria_id": kat_dict[n_kat],
+                    "status": n_status
+                }
+                try:
+                    supabase.table("magazyn").insert(nowy_rekord).execute()
+                    st.success(f"Pomyślnie dodano: {n_nazwa}")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Błąd zapisu: {e}")
+            else:
+                st.warning("Nazwa produktu nie może być pusta!")
 
-# --- TAB 1: STAN MAGAZYNOWY (Z filtrowaniem) ---
+# --- TAB: STAN MAGAZYNOWY ---
 with tab_magazyn:
     df = fetch_data()
     if not df.empty:
-        # Aplikacja logiki biznesowej
         def apply_logic(row):
             status = row['status']
-            # Choinki < 30 sztuk -> utylizacja
+            # Zasada: Choinki < 30 sztuk są utylizowane
             if "Choinka" in str(row['nazwa_produktu']) and row['ilosc'] < 30:
                 status = "utylizuj"
             
-            # Punkty odrzucane: wysyłka, wyprzedane, utylizuj
+            # Zasada: Punkty odrzucane gdy status to "wysyłka", "wyprzedane" lub "utylizuj"
             punkty = "NIE" if status in ["wysyłka", "wyprzedane", "utylizuj"] else "TAK"
             return pd.Series([status, punkty])
 
         df[['status', 'naliczaj_punkty']] = df.apply(apply_logic, axis=1)
-        # Formuła TIR: ZAOKR.GÓRA(Ilość / Pojemność)
+        # Formuła TIRów: =ZAOKR.GÓRA(Ilość / Parametry!$C$6)
         df['TIRy'] = df['ilosc'].apply(lambda x: math.ceil(x / tir_limit))
 
-        # Filtry
-        f_col1, f_col2 = st.columns(2)
-        with f_col1:
-            kat_filter = st.multiselect("Filtruj wg kategorii", options=df['kategoria'].unique())
-        with f_col2:
-            stat_filter = st.multiselect("Filtruj wg statusu", options=df['status'].unique())
+        st.subheader(f"Aktualne stany (Pojemność TIRa: {tir_limit} szt.)")
+        st.dataframe(df[['nazwa_produktu', 'kategoria', 'ilosc', 'cena', 'status', 'naliczaj_punkty', 'TIRy']], use_container_width=True)
+    else:
+        st.info("Magazyn jest pusty.")
 
-        dff = df.copy()
-        if kat_filter: dff = dff[dff['kategoria'].isin(kat_filter)]
-        if stat_filter: dff = dff[dff['status'].isin(stat_filter)]
-
-        st.dataframe(dff[['nazwa_produktu', 'kategoria', 'ilosc', 'status', 'naliczaj_punkty', 'TIRy']], use_container_width=True)
-        
-        # Szybki raport
-        st.write(f"**Łączna liczba potrzebnych TIRów:** {dff['TIRy'].sum()}")
-
-# --- TAB 2: EDYCJA I USUWANIE ---
+# --- TAB: EDYCJA I USUWANIE ---
 with tab_zarzadzanie:
-    col_edit, col_del = st.columns(2)
-    
-    with col_edit:
-        st.subheader("Edytuj produkt")
-        edit_prod = st.selectbox("Wybierz produkt do edycji", df['nazwa_produktu'].tolist())
-        row_to_edit = df[df['nazwa_produktu'] == edit_prod].iloc[0]
+    if not df.empty:
+        col_e, col_d = st.columns(2)
+        with col_e:
+            st.subheader("Edytuj produkt")
+            wybrany = st.selectbox("Wybierz towar", df['nazwa_produktu'].tolist())
+            dane = df[df['nazwa_produktu'] == wybrany].iloc[0]
+            with st.form("edycja"):
+                e_ilosc = st.number_input("Zmień ilość", value=int(dane['ilosc']))
+                e_status = st.selectbox("Zmień status", ["dostępny", "wysyłka", "wyprzedane", "utylizuj"], 
+                                        index=["dostępny", "wysyłka", "wyprzedane", "utylizuj"].index(dane['status']))
+                if st.form_submit_button("Zapisz zmiany"):
+                    supabase.table("magazyn").update({"ilosc": e_ilosc, "status": e_status}).eq("id", dane['id']).execute()
+                    st.rerun()
         
-        with st.form("edit_form"):
-            new_n = st.text_input("Nazwa", value=row_to_edit['nazwa_produktu'])
-            new_p = st.number_input("Cena", value=float(row_to_edit['cena']))
-            new_s = st.selectbox("Status", ["dostępny", "wysyłka", "wyprzedane", "utylizuj"], 
-                                 index=["dostępny", "wysyłka", "wyprzedane", "utylizuj"].index(row_to_edit['status']))
-            if st.form_submit_button("Zapisz zmiany"):
-                supabase.table("magazyn").update({"nazwa_produktu": new_n, "cena": new_p, "status": new_s}).eq("id", row_to_edit['id']).execute()
-                st.success("Zaktualizowano dane!")
+        with col_d:
+            st.subheader("Usuń produkt")
+            do_usuniecia = st.selectbox("Towar do usunięcia", df['nazwa_produktu'].tolist())
+            if st.button("🔴 USUŃ TRWALE"):
+                id_usunj = df[df['nazwa_produktu'] == do_usuniecia].iloc[0]['id']
+                supabase.table("magazyn").delete().eq("id", id_usunj).execute()
                 st.rerun()
 
-    with col_del:
-        st.subheader("Usuń produkt")
-        del_prod = st.selectbox("Wybierz produkt do usunięcia", df['nazwa_produktu'].tolist(), key="del")
-        if st.button("🔴 USUŃ TRWALE", help="Tej operacji nie da się cofnąć"):
-            id_to_del = df[df['nazwa_produktu'] == del_prod].iloc[0]['id']
-            supabase.table("magazyn").delete().eq("id", id_to_del).execute()
-            st.warning(f"Usunięto {del_prod}")
-            st.rerun()
+# --- TAB: USTAWIENIA ---
+with tab_ustawienia:
+    st.header("Konfiguracja parametrów")
+    nowa_poj = st.number_input("Zmień pojemność transportową TIRa", value=tir_limit)
+    if st.button("Aktualizuj parametr $C$6"):
+        supabase.table("parametry").update({"wartosc_int": nowa_poj}).eq("klucz", "pojemnosc_tir").execute()
+        st.success("Zmieniono globalne ustawienia logistyki.")
+        st.rerun()
