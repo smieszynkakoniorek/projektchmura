@@ -9,68 +9,78 @@ URL = "https://pmgklpkyljdvhhxklnmq.supabase.co"
 KEY = "sb_publishable_d0ujpfmIqQlSzL7Xnj60wA_M-coVjs3"
 supabase = create_client(URL, KEY)
 
-# --- FUNKCJA POBIERANIA ---
-def get_data():
-    res = supabase.table("magazyn").select("*, kategorie(nazwa)").execute()
-    return pd.DataFrame(res.data)
+def fetch_safe_data():
+    try:
+        res = supabase.table("magazyn").select("*, kategorie(nazwa)").execute()
+        df = pd.DataFrame(res.data)
+        if not df.empty:
+            df['kategoria'] = df['kategorie'].apply(lambda x: x['nazwa'] if x else 'Brak')
+            
+            # --- ZASTOSOWANIE TWOICH ZASAD BIZNESOWYCH ---
+            # 1. Pobranie parametru TIR ($C$6)
+            config = supabase.table("parametry").select("wartosc_int").eq("klucz", "pojemnosc_tir").single().execute()
+            tir_limit = config.data['wartosc_int']
+            
+            # 2. Logika utylizacji choinek < 30 sztuk
+            def calculate_status(row):
+                if "Choinka" in str(row['nazwa_produktu']) and row['ilosc'] < 30:
+                    return "utylizuj"
+                return row['status']
+            
+            df['status'] = df.apply(calculate_status, axis=1)
 
-def get_config():
-    res = supabase.table("parametry").select("*").eq("klucz", "pojemnosc_tir").single().execute()
-    return res.data['wartosc_int']
+            # 3. Odrzucanie punktów dla statusów: wysyłka, wyprzedane, utylizuj
+            statusy_odrzucone = ["wysyłka", "wyprzedane", "utylizuj"]
+            df['punkty_liczone'] = df['status'].apply(lambda x: "NIE" if x in statusy_odrzucone else "TAK")
 
-# --- GŁÓWNA APLIKACJA ---
-df = get_data()
+            # 4. Formuła TIRów: ZAOKR.GÓRA(ilosc / parametr)
+            df['TIRy'] = df['ilosc'].apply(lambda x: math.ceil(x / tir_limit))
+            
+            return df, tir_limit
+    except Exception as e:
+        st.error(f"Błąd pobierania danych: {e}")
+    return pd.DataFrame(), 80
 
-if df.empty:
-    st.warning("⚠️ Baza danych jest pusta. Dashboard nie ma danych do wyświetlenia.")
-else:
-    # Pobieranie parametru C6 dla TIRów
-    tir_limit = get_config()
+st.title("📊 System WMS - Dashboard")
 
-    # Zastosowanie Twoich reguł biznesowych
-    def apply_rules(row):
-        status = row['status']
-        # Choinki poniżej 30 sztuk są utylizowane
-        if "Choinka" in str(row['nazwa_produktu']) and row['ilosc'] < 30:
-            status = "utylizuj"
+df, limit = fetch_safe_data()
+
+if not df.empty:
+    tab_dash, tab_tabela = st.tabs(["📈 Analiza Wykresów", "📋 Pełna Tabela"])
+
+    with tab_dash:
+        col1, col2 = st.columns(2)
         
-        # Punkty są odrzucane, gdy status to "wysyłka", "wyprzedane" lub "utylizuj"
-        punkty = "NIE" if status in ["wysyłka", "wyprzedane", "utylizuj"] else "TAK"
-        return pd.Series([status, punkty])
+        with col1:
+            # Wykres ilości produktów z podziałem na statusy
+            fig_stock = px.bar(
+                df, 
+                x='nazwa_produktu', 
+                y='ilosc', 
+                color='status',
+                title="Stan Magazynowy wg Produktu",
+                color_discrete_map={"utylizuj": "red", "dostępny": "green", "wysyłka": "blue", "wyprzedane": "gray"}
+            )
+            st.plotly_chart(fig_stock, use_container_width=True)
 
-    df[['status', 'punkty_liczone']] = df.apply(apply_rules, axis=1)
-    
-    # Formuła do obliczania TIRów: =ZAOKR.GÓRA(ilość / pojemność)
-    df['TIRy'] = df['ilosc'].apply(lambda x: math.ceil(x / tir_limit))
+        with col2:
+            # Wykres kołowy pokazujący udział kategorii
+            fig_pie = px.pie(
+                df, 
+                names='kategoria', 
+                values='ilosc', 
+                title="Udział Kategorii w Magazynie"
+            )
+            st.plotly_chart(fig_pie, use_container_width=True)
+            
+        # Dodatkowe wskaźniki
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Suma potrzebnych TIRów", df['TIRy'].sum())
+        m2.metric("Produkty bez punktów", len(df[df['punkty_liczone'] == "NIE"]))
+        m3.metric("Łączna ilość sztuk", df['ilosc'].sum())
 
-    # --- SEKCOJA DASHBOARD ---
-    st.header("📈 Dashboard Analityczny")
-    
-    col1, col2 = st.columns(2)
-
-    with col1:
-        try:
-            # Wykres słupkowy ilości produktów
-            fig1 = px.bar(df, x='nazwa_produktu', y='ilosc', color='status', 
-                          title="Ilość towaru wg Statusu",
-                          labels={'ilosc': 'Liczba sztuk', 'nazwa_produktu': 'Produkt'})
-            st.plotly_chart(fig1, use_container_width=True)
-        except Exception as e:
-            st.error(f"Błąd wykresu słupkowego: {e}")
-
-    with col2:
-        try:
-            # Wykres kołowy kategorii
-            # Wyciągamy nazwy kategorii
-            df['kat_nazwa'] = df['kategorie'].apply(lambda x: x['nazwa'] if x else 'Brak')
-            fig2 = px.pie(df, names='kat_nazwa', title="Udział Kategorii w Magazynie")
-            st.plotly_chart(fig2, use_container_width=True)
-        except Exception as e:
-            st.error(f"Błąd wykresu kołowego: {e}")
-
-    # Statystyki ogólne
-    st.divider()
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Suma towaru", int(df['ilosc'].sum()))
-    m2.metric("Łącznie TIRów", int(df['TIRy'].sum()))
-    m3.metric("Produkty utylizowane", len(df[df['status'] == 'utylizuj']))
+    with tab_tabela:
+        st.write(f"### Dane magazynowe (Parametr TIR: {limit})")
+        st.dataframe(df[['nazwa_produktu', 'ilosc', 'status', 'punkty_liczone', 'TIRy', 'kategoria']])
+else:
+    st.warning("Baza danych jest pusta lub nie udało się połączyć. Dodaj towary, aby zobaczyć dashboard.")
