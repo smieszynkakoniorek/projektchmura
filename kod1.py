@@ -3,113 +3,102 @@ from supabase import create_client
 import pandas as pd
 import math
 
-# --- KONFIGURACJA POŁĄCZENIA ---
+# --- POŁĄCZENIE ---
 URL = "https://pmgklpkyljdvhhxklnmq.supabase.co"
 KEY = "sb_publishable_d0ujpfmIqQlSzL7Xnj60wA_M-coVjs3"
 supabase = create_client(URL, KEY)
 
-st.set_page_config(page_title="WMS Pro 2026", layout="wide")
+st.set_page_config(page_title="WMS Enterprise 2026", layout="wide")
 
-# --- FUNKCJE POMOCNICZE ---
+# --- FUNKCJE BAZODANOWE ---
 def fetch_data():
-    """Pobiera świeże dane z bazy."""
-    res_m = supabase.table("magazyn").select("*, kategorie(nazwa)").execute()
-    df = pd.DataFrame(res_m.data)
+    res = supabase.table("magazyn").select("*, kategorie(nazwa)").execute()
+    df = pd.DataFrame(res.data)
     if not df.empty:
         df['kategoria'] = df['kategorie'].apply(lambda x: x['nazwa'] if x else 'Brak')
     return df
 
-def fetch_categories():
-    """Pobiera listę kategorii do formularza."""
-    res_c = supabase.table("kategorie").select("*").execute()
-    return {item['nazwa']: item['id'] for item in res_c.data}
+def fetch_config():
+    res = supabase.table("parametry").select("*").eq("klucz", "pojemnosc_tir").single().execute()
+    return res.data
 
-# --- INTERFEJS UŻYTKOWNIKA ---
-st.title("📦 System WMS: Zarządzanie Magazynem")
+# --- INTERFEJS ---
+st.title("🚀 Zaawansowany System WMS")
 
-# Sidebar - Dodawanie i Edycja
-with st.sidebar:
-    st.header("Zarządzanie Towarem")
-    
-    # 1. FORMULARZ: DODAWANIE NOWEGO PRODUKTU
-    with st.expander("➕ Dodaj nowy produkt"):
-        with st.form("add_form", clear_on_submit=True):
-            nowa_nazwa = st.text_input("Nazwa produktu")
-            nowa_ilosc = st.number_input("Ilość początkowa", min_value=0, step=1)
-            nowa_cena = st.number_input("Cena", min_value=0.0, step=0.01)
-            kategorie_dict = fetch_categories()
-            wybrana_kat = st.selectbox("Kategoria", options=list(kategorie_dict.keys()))
-            nowy_status = st.selectbox("Status", ["dostępny", "wysyłka", "wyprzedane", "utylizuj"])
-            
-            submit_add = st.form_submit_button("Zatwierdź produkt")
-            
-            if submit_add and nowa_nazwa:
-                new_data = {
-                    "nazwa_produktu": nowa_nazwa,
-                    "ilosc": nowa_ilosc,
-                    "cena": nowa_cena,
-                    "kategoria_id": kategorie_dict[wybrana_kat],
-                    "status": nowy_status
-                }
-                supabase.table("magazyn").insert(new_data).execute()
-                st.success("Dodano produkt!")
-                st.rerun()
+# Taby dla lepszej organizacji
+tab_magazyn, tab_zarzadzanie, tab_ustawienia = st.tabs(["📋 Stan Magazynowy", "🛠️ Edycja i Usuwanie", "⚙️ Ustawienia Systemu"])
 
-    # 2. FORMULARZ: DODAJ/ODEJMIJ ILOŚĆ (AKTUALIZACJA)
-    with st.expander("🔄 Zmień ilość (Dostawa/Wydanie)"):
-        df_current = fetch_data()
-        if not df_current.empty:
-            produkt_do_zmiany = st.selectbox("Wybierz produkt", df_current['nazwa_produktu'].tolist())
-            operacja = st.radio("Operacja", ["Dodaj", "Odejmij"])
-            ile_zmienic = st.number_input("Ilość", min_value=1, step=1)
-            
-            if st.button("Zapisz zmianę ilości"):
-                row = df_current[df_current['nazwa_produktu'] == produkt_do_zmiany].iloc[0]
-                nowa_suma = row['ilosc'] + ile_zmienic if operacja == "Dodaj" else row['ilosc'] - ile_zmienic
-                
-                if nowa_suma < 0:
-                    st.error("Błąd: Ilość nie może być ujemna!")
-                else:
-                    supabase.table("magazyn").update({"ilosc": nowa_suma}).eq("id", row['id']).execute()
-                    st.success(f"Zaktualizowano {produkt_do_zmiany} na {nowa_suma} szt.")
-                    st.rerun()
+# --- TAB 3: USTAWIENIA (Zarządzanie parametrem C6) ---
+with tab_ustawienia:
+    st.header("Parametry Logistyczne")
+    config = fetch_config()
+    nowa_pojemnosc = st.number_input("Pojemność 1 TIRa (Parametr $C$6)", value=config['wartosc_int'], step=1)
+    if st.button("Zapisz nową pojemność"):
+        supabase.table("parametry").update({"wartosc_int": nowa_pojemnosc}).eq("klucz", "pojemnosc_tir").execute()
+        st.success("Zaktualizowano parametry transportu!")
+        st.rerun()
 
-# --- GŁÓWNY PANEL WYŚWIETLANIA ---
-try:
-    # Pobranie limitu TIRa
-    res_p = supabase.table("parametry").select("*").eq("klucz", "pojemnosc_tir").single().execute()
-    tir_limit = res_p.data['wartosc_int']
+tir_limit = nowa_pojemnosc
 
+# --- TAB 1: STAN MAGAZYNOWY (Z filtrowaniem) ---
+with tab_magazyn:
     df = fetch_data()
-
     if not df.empty:
-        # LOGIKA BIZNESOWA (zgodnie z Twoimi instrukcjami)
-        def apply_rules(row):
+        # Aplikacja logiki biznesowej
+        def apply_logic(row):
             status = row['status']
-            # Choinki poniżej 30 sztuk są utylizowane
+            # Choinki < 30 sztuk -> utylizacja
             if "Choinka" in str(row['nazwa_produktu']) and row['ilosc'] < 30:
                 status = "utylizuj"
             
-            # Punkty odrzucane dla konkretnych statusów
-            punkty = "TAK" if status not in ["wysyłka", "wyprzedane", "utylizuj"] else "NIE"
+            # Punkty odrzucane: wysyłka, wyprzedane, utylizuj
+            punkty = "NIE" if status in ["wysyłka", "wyprzedane", "utylizuj"] else "TAK"
             return pd.Series([status, punkty])
 
-        df[['status', 'naliczaj_punkty']] = df.apply(apply_rules, axis=1)
+        df[['status', 'naliczaj_punkty']] = df.apply(apply_logic, axis=1)
+        # Formuła TIR: ZAOKR.GÓRA(Ilość / Pojemność)
         df['TIRy'] = df['ilosc'].apply(lambda x: math.ceil(x / tir_limit))
 
-        # Statystyki
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Suma towaru", df['ilosc'].sum())
-        c2.metric("Do utylizacji", len(df[df['status'] == 'utylizuj']))
-        c3.metric("Potrzebne TIRy", df['TIRy'].sum())
+        # Filtry
+        f_col1, f_col2 = st.columns(2)
+        with f_col1:
+            kat_filter = st.multiselect("Filtruj wg kategorii", options=df['kategoria'].unique())
+        with f_col2:
+            stat_filter = st.multiselect("Filtruj wg statusu", options=df['status'].unique())
 
-        # Tabela
-        st.dataframe(
-            df[['nazwa_produktu', 'kategoria', 'ilosc', 'status', 'naliczaj_punkty', 'TIRy']],
-            use_container_width=True
-        )
-    else:
-        st.info("Magazyn jest pusty. Dodaj pierwszy produkt w panelu bocznym.")
+        dff = df.copy()
+        if kat_filter: dff = dff[dff['kategoria'].isin(kat_filter)]
+        if stat_filter: dff = dff[dff['status'].isin(stat_filter)]
 
-except Exception as e:
-    st.error(f"Problem z połączeniem: {e}")
+        st.dataframe(dff[['nazwa_produktu', 'kategoria', 'ilosc', 'status', 'naliczaj_punkty', 'TIRy']], use_container_width=True)
+        
+        # Szybki raport
+        st.write(f"**Łączna liczba potrzebnych TIRów:** {dff['TIRy'].sum()}")
+
+# --- TAB 2: EDYCJA I USUWANIE ---
+with tab_zarzadzanie:
+    col_edit, col_del = st.columns(2)
+    
+    with col_edit:
+        st.subheader("Edytuj produkt")
+        edit_prod = st.selectbox("Wybierz produkt do edycji", df['nazwa_produktu'].tolist())
+        row_to_edit = df[df['nazwa_produktu'] == edit_prod].iloc[0]
+        
+        with st.form("edit_form"):
+            new_n = st.text_input("Nazwa", value=row_to_edit['nazwa_produktu'])
+            new_p = st.number_input("Cena", value=float(row_to_edit['cena']))
+            new_s = st.selectbox("Status", ["dostępny", "wysyłka", "wyprzedane", "utylizuj"], 
+                                 index=["dostępny", "wysyłka", "wyprzedane", "utylizuj"].index(row_to_edit['status']))
+            if st.form_submit_button("Zapisz zmiany"):
+                supabase.table("magazyn").update({"nazwa_produktu": new_n, "cena": new_p, "status": new_s}).eq("id", row_to_edit['id']).execute()
+                st.success("Zaktualizowano dane!")
+                st.rerun()
+
+    with col_del:
+        st.subheader("Usuń produkt")
+        del_prod = st.selectbox("Wybierz produkt do usunięcia", df['nazwa_produktu'].tolist(), key="del")
+        if st.button("🔴 USUŃ TRWALE", help="Tej operacji nie da się cofnąć"):
+            id_to_del = df[df['nazwa_produktu'] == del_prod].iloc[0]['id']
+            supabase.table("magazyn").delete().eq("id", id_to_del).execute()
+            st.warning(f"Usunięto {del_prod}")
+            st.rerun()
