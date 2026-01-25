@@ -135,9 +135,28 @@ def update_stock(product_id, product_name, change_amount, operation_type, curren
         return False, str(e)
 
 # --- UI APLIKACJI ---
+
+# Naprawiony CSS: Wymusza czarny tekst wewnątrz kafelków (Metrics),
+# nawet jeśli cała aplikacja jest w trybie Dark Mode.
 st.markdown("""
 <style>
-    .stMetric { background-color: #f0f2f6; padding: 10px; border-radius: 5px; }
+    div[data-testid="stMetric"] {
+        background-color: #ffffff;
+        border: 1px solid #e0e0e0;
+        padding: 15px;
+        border-radius: 8px;
+        color: #000000;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+    /* Etykieta (np. "Produkty") - ciemnoszary */
+    div[data-testid="stMetric"] label {
+        color: #666666 !important;
+    }
+    /* Wartość (np. "11") - czarny */
+    div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
+        color: #000000 !important;
+    }
+    /* Ikona delty (zmiany) - zachowuje oryginalne kolory (zielony/czerwony) */
 </style>
 """, unsafe_allow_html=True)
 
