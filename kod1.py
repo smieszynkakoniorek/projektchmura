@@ -43,9 +43,9 @@ st.markdown("""
 def init_connection():
     # WPISZ TUTAJ DANE ZE SWOJEGO ZRZUTU EKRANU (Settings -> API)
     url = "https://pmgklpkyljdvhhxklnmq.supabase.co" 
-    key = "TUTAJ_WKLEJ_SWOJ_SUPABASE_KEY_ANON_PUBLIC"  # Wklej klucz zaczynający się od eyJ...
+    key = "sb_publishable_d0ujpfmIqQlSzL7Xnj60wA_M-coVjs3"  # Wklej klucz zaczynający się od eyJ...
     
-    if key == "TUTAJ_WKLEJ_SWOJ_SUPABASE_KEY_ANON_PUBLIC":
+    if key == "sb_publishable_d0ujpfmIqQlSzL7Xnj60wA_M-coVjs3":
         st.error("⚠️ Uzupełnij klucz API w kodzie (funkcja init_connection)!")
         st.stop()
         
